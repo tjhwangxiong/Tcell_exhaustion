@@ -1,0 +1,181 @@
+---
+title: "GSVA-KEGG"
+author: "Xiong Wang"
+date: "2023-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.C2 KEGG pathway extraction
+
+```{r}
+rm(list=ls())
+# reference：https://zhuanlan.zhihu.com/p/518145829
+load("data/Pancreas_expr_ph.Rdata")
+load("data/riskscore_model.Rdata")
+
+library(msigdbr)
+# C2 KEGG pathways were downloaded using msgdbr R package
+KEGG_df_all <-  msigdbr(species = "Homo sapiens", # Homo sapiens or Mus musculus
+                        category = "C2",
+                        subcategory = "CP:KEGG") 
+KEGG_df <- dplyr::select(KEGG_df_all,gs_name,gs_exact_source,gene_symbol)
+
+# gene_symbol was grouped according to gs_name
+kegg_list <- split(KEGG_df$gene_symbol, KEGG_df$gs_name) 
+
+```
+
+# 2.GSVA-KEGG
+
+```{r}
+library(GSVA)
+
+surv=risk_model[order(risk_model$Risk),]
+table(surv$Risk)
+# low high 
+# 89   89
+
+dat=exp_cpm[,rownames(surv)]
+identical(rownames(surv),colnames(dat))
+#[1] TRUE
+
+group_list=factor(c(rep("low",89),rep("high",89)),levels = c("low","high"))
+
+geneset <- kegg_list
+
+gsva_mat_kegg <- gsva(expr=dat, 
+                 gset.idx.list=geneset, 
+                 kcdf="Gaussian" , #"Gaussian" for logCPM,logRPKM,logTPM, "Poisson" for counts
+                 verbose=T, 
+                 parallel.sz = parallel::detectCores()) # use all cores
+
+write.csv(gsva_mat_kegg,"data/gsva_kegg_matrix.csv")
+
+```
+
+# 3.Significantly differential KEGG pathways
+
+```{r}
+library(limma)
+exp="high"
+ctr="low"
+
+design <- model.matrix(~0+factor(group_list))
+colnames(design) <- levels(factor(group_list))
+rownames(design) <- colnames(gsva_mat_kegg)
+contrast.matrix <- makeContrasts(contrasts=paste0(exp,'-',ctr),  #"exp/ctrl"
+                                 levels = design)
+
+fit1 <- lmFit(gsva_mat_kegg,design)                
+fit2 <- contrasts.fit(fit1, contrast.matrix) 
+efit <- eBayes(fit2)                         
+
+summary(decideTests(efit,lfc=0.1, p.value=0.05)) 
+tempOutput <- topTable(efit, coef=paste0(exp,'-',ctr), n=Inf)
+degs_kegg <- na.omit(tempOutput) 
+write.csv(degs_kegg,"data/gsva_kegg_degs.results.csv")
+
+```
+
+# 4.Volcano plot
+
+```{r}
+degs_kegg$change = ifelse(degs_kegg$P.Value < 0.05 & abs(degs_kegg$logFC) > 0.1,
+                    ifelse(degs_kegg$logFC > 0.1 ,'UP','DOWN'),'NOT')
+
+library(ggplot2)
+p <-ggplot(data = degs_kegg, 
+           aes(x = logFC, 
+               y = -log10(P.Value)
+           ))+
+  geom_point(alpha=0.4, size=3.5, 
+             aes(color=change))+
+  ylab("-log10(p value)")+
+  scale_color_manual(values=c("blue", "grey","red"))+
+  geom_vline(xintercept=c(-0.1,0.1),lty=4,col="black",lwd=0.8)+
+  geom_hline(yintercept = -log10(0.05),lty=4,col="black",lwd=0.8)+
+  theme_bw()+
+  theme(axis.text.x = element_text(size = 12,color = "black"),
+        axis.text.y=element_text(size=12,color = "black"),
+        axis.title.x = element_text(size = 14,color = "black"),
+        axis.title.y = element_text(size = 14,color = "black"),
+        legend.position = c(0.1,0.8),
+        legend.background = element_rect(fill = rgb(1,1,1,alpha = 0.001),colour = NA),
+        panel.border = element_rect(fill=NA,colour = "black",linewidth=1,linetype = "solid"))+  
+  xlim(-0.25,0.25)
+p
+
+
+```
+
+# 5.Bar plot 
+
+```{r}
+# install.packages("ggthemes")
+# install.packages("ggprism")
+library(tidyverse)  # ggplot2 stringer dplyr tidyr readr purrr  tibble forcats
+library(ggthemes)
+library(ggprism)
+
+p_cutoff=0.05
+
+degs <- degs_kegg[,1:6] 
+
+# Select the top4 positive and top4 negative pathways
+Diff <- rbind(subset(degs,logFC>0)[1:4,], subset(degs,logFC<0)[1:4,])
+
+dat_plot <- data.frame(id  = row.names(Diff),
+                       p   = Diff$P.Value,
+                       lgfc= Diff$logFC)
+
+# set upregulated pathways as 1, while downregulated pathways as -1.
+dat_plot$group <- ifelse(dat_plot$lgfc>0 ,1,-1)
+
+# set upregulated pathways as positive, while downregulated pathways as negative.
+dat_plot$lg_p <- -log10(dat_plot$p)*dat_plot$group 
+
+dat_plot$id <- str_replace(dat_plot$id, "KEGG_","")
+
+dat_plot$threshold <- factor(ifelse(abs(dat_plot$p) <= p_cutoff,
+                                    ifelse(dat_plot$lgfc >0 ,'Up','Down')),
+                             levels=c('Up','Down'))
+
+dat_plot <- dat_plot %>% arrange(lg_p)
+dat_plot$id <- factor(dat_plot$id,levels = dat_plot$id)
+
+# label
+low1 <- dat_plot %>% filter(lg_p < log10(p_cutoff)) %>% nrow()
+low0 <- dat_plot %>% filter(lg_p < 0) %>% nrow()
+high0 <- dat_plot %>% filter(lg_p < -log10(p_cutoff)) %>% nrow()
+high1 <- nrow(dat_plot)
+
+p <- ggplot(data = dat_plot,aes(x = id, y = lg_p, 
+                                fill = threshold)) +
+  geom_col(width = 0.7)+
+  coord_flip() + 
+  scale_fill_manual(values = c('Up'= '#ff9999','Down'='#9999ff')) +
+  geom_hline(yintercept = c(-log10(p_cutoff),log10(p_cutoff)),color = 'white',size = 0.1,lty='dashed') +
+  xlab('KEGG Pathway') + 
+  ylab('-log10(P value) of GSVA score') + 
+  guides(fill="none")+
+  theme_prism(border = T) +
+  theme(axis.text.x = element_text(size = 12,color = "black",face = "plain"),
+        axis.title.x = element_text(size = 14,color = "black",face = "plain"),
+        axis.title.y = element_text(size = 14,color = "black",face = "plain"),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.border = element_rect(fill=NA,colour = "black",linewidth=1,linetype = "solid")
+  ) +
+  geom_text(data = dat_plot[1:low1,],aes(x = id,y = 0.1,label = id),
+            hjust = 0,color = 'black') + # black label
+  geom_text(data = dat_plot[(high0 +1):high1,],aes(x = id,y = -0.1,label = id),
+            hjust = 1,color = 'black') # black label
+
+p
+
+```
+

@@ -1,0 +1,398 @@
+---
+title: "TME"
+author: "Xiong Wang"
+date: "2023-11-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.Immune scores
+
+```{r cars}
+rm(list=ls())
+load("data/Pancreas_expr_ph.Rdata")
+load("data/riskscore_model.Rdata")
+library(stringr)
+# estimate function reference: https://zhuanlan.zhihu.com/p/136747705 
+estimate <- function(dat,pro){
+  input.f=paste0('data/TME/',pro,'_estimate_input.txt')
+  output.f=paste0('data/TME/',pro,'_estimate_gene.gct')
+  output.ds=paste0('data/TME/',pro,'_estimate_score.gct')
+  write.table(dat,file = input.f,sep = '\t',quote = F)
+  library(estimate)
+  filterCommonGenes(input.f=input.f,
+                    output.f=output.f ,
+                    id="GeneSymbol")
+  estimateScore(input.ds = output.f,
+                output.ds=output.ds,
+                platform="illumina")   ## 注意这个platform参数
+  scores=read.table(output.ds,skip = 2,header = T)
+  rownames(scores)=scores[,1]
+  scores=t(scores[,3:ncol(scores)])
+  return(scores)
+}
+pro='paad'
+paad=exp_cpm[,str_sub(colnames(exp_cpm,1,15)) %in% rownames(risk_model)]
+paad=paad[,rownames(risk_model)]
+
+scores=data.frame(estimate(paad,pro))
+
+rownames(scores)=stringr::str_replace_all(rownames(scores),'[.]','-')
+scores=scores[rownames(risk_model),]
+
+identical(rownames(scores),rownames(risk_model))
+#[1] TRUE
+
+immu_dat=cbind(risk_model,scores)
+save(immu_dat,paad,file="data/TME/immunescore.Rdata")
+
+library(ggpubr)
+# Violin plot of StromalScore
+p <- ggviolin(immu_dat, x = "Risk", 
+              y = "StromalScore", 
+              fill = "Risk", 
+              palette = "jco", 
+              alpha = 1,
+              width = 0.5,
+              legend = "top",legend.title = "Risk",
+              font.legend = c(12, "bold", "black"),
+              xlab='',
+              font.y = 16,
+              x.text.angle = 0, y.text.angle = 90,
+              font.tickslab = c(15,"plain","black"), 
+              add = "boxplot",
+              add.params = list(fill = "white",
+                                width = 0.1,
+                                linetype = 1)
+) 
+p
+
+
+# facet
+df <- immu_dat[,11:14] 
+library(reshape2) 
+df <- melt(df, id.vars = "Risk") 
+
+
+p <- ggviolin(df, x = "Risk",
+              y = "value", # 
+              fill = "Risk", 
+              facet.by = "variable",
+              alpha = 1,width = 0.5,legend = "right",legend.title = "Risk",
+              xlab=FALSE,
+              font.y = 15,x.text.angle = 0, y.text.angle = 90,
+              font.tickslab = c(15,"plain","black"),
+              add = "boxplot", 
+              add.params = list(fill = "white", width = 0.1,linetype = 1)) 
+p <- p + stat_compare_means(method = "wilcox.test", label = "p.format",
+                            label.x=1.5, size = 5) 
+p
+```
+
+# 2.Immune cell and immune function gene sets
+
+Immune cell and immune function gene sets were downloaded from https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6310928/
+
+```{r}
+rm(list=ls())
+library(readxl)
+
+genelist=read_excel("data/TME/13046_2018_1002_MOESM1_ESM.xlsx",col_names = T,
+                    skip=1) 
+# 16 types of immune cells
+i_cell=as.matrix(genelist[,c("aDCs","B cells","CD8+ T cells","DCs","iDCs","Macrophages","Mast cells","Neutrophils",
+                             "NK cells","pDCs","T helper cells","Tfh","Th1 cells","Th2 cells","TIL","Treg")])
+
+# 13 types of immune functions
+i_fun=as.matrix(genelist[,c("APC co inhibition","APC co stimulation","CCR","Check-point","Cytolytic activity","HLA","Inflammation-promoting","MHC class I","T cell co-inhibition","T cell co-stimulation","Type I IFN Reponse",
+                            "Type II IFN Reponse")])
+
+set1 <- colnames(i_cell)
+list_icell <- list()
+for (i in set1) {
+  x <-  as.character(i_cell[,i])
+  x <- x[nchar(x)!=0 & !is.na(x)]
+  x <-  as.character(x)
+  list_icell[[i]] <-x
+}
+
+set2 <- colnames(i_fun)
+list_ifun <- list()
+for (i in set2) {
+  x <-  as.character(i_fun[,i])
+  x <- x[nchar(x)!=0 & !is.na(x)] 
+  x <-  as.character(x)
+  list_ifun[[i]] <-x
+}
+save(list_icell,list_ifun,file = "data/TME/immune_cell_fun_genesignature.Rdata")
+```
+
+# 3.GSVA
+
+```{r}
+rm(list=ls())
+load("data/TME/immunescore.Rdata")
+load("data/TME/immune_cell_fun_genesignature.Rdata")
+
+library(GSVA)
+
+# GSVA
+ssgsea_icell<- gsva(paad, list_icell,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+ssgsea_ifun<- gsva(paad, list_ifun,method='ssgsea',kcdf='Gaussian',abs.ranking=TRUE)
+
+### plots for immune cells
+ssgsea.1 <- ssgsea_icell
+for (i in colnames(ssgsea_icell)) {
+  ssgsea.1[,i] <- (ssgsea_icell[,i] -min(ssgsea_icell[,i]))/(max(ssgsea_icell[,i] )-min(ssgsea_icell[,i] ))
+  
+}
+
+df=data.frame(t(ssgsea.1))
+rownames(df)=stringr::str_replace_all(rownames(df),'[.]','-')
+colnames(df)=stringr::str_replace_all(colnames(df),'[.]',' ')
+
+identical(rownames(df),rownames(immu_dat))
+#[1] TRUE
+
+dat=cbind(immu_dat[,11],df)
+colnames(dat)[1]="Risk"
+dat1=reshape2::melt(dat,
+                    id.vars = colnames(dat)[1],
+                    variable.name = "Celltype", 
+                    value.name = "Score" 
+)
+
+
+library(ggpubr)
+p <- ggboxplot(dat1, 
+               x = "Celltype", y = "Score", fill = "Risk", xlab = "", color = "black", 
+               palette = "jco") + rotate_x_text(angle = 45) + grids(linetype = "dashed") + 
+  theme(legend.title = element_text(size = 14), legend.text = element_text(size = 12), 
+        axis.title.x = element_text(size = 14), axis.text.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 14), axis.text.y = element_text(size = 12)) + 
+  border("black") + theme(legend.position = "top")
+
+p + stat_compare_means(aes(group = Risk), method = "wilcox.test", label = "p.signif",
+                       label.y.npc = "top", hide.ns = T)
+
+
+### plots for immune functions
+ssgsea.2 <- ssgsea_ifun
+for (i in colnames(ssgsea_ifun)) {
+  ssgsea.2[,i] <- (ssgsea_ifun[,i] -min(ssgsea_ifun[,i]))/(max(ssgsea_ifun[,i] )-min(ssgsea_ifun[,i] ))
+  
+}
+
+df1=data.frame(t(ssgsea.2))
+rownames(df1)=stringr::str_replace_all(rownames(df1),'[.]','-')
+colnames(df1)=stringr::str_replace_all(colnames(df1),'[.]',' ')
+
+identical(rownames(df1),rownames(immu_dat))
+#[1] TRUE
+
+dat2=cbind(immu_dat[,11],df1)
+colnames(dat2)[1]="Risk"
+dat3=reshape2::melt(dat2,
+                    id.vars = colnames(dat2)[1],
+                    variable.name = "Celltype", 
+                    value.name = "Score" # 
+)
+
+library(ggpubr)
+p1 <- ggboxplot(dat3, 
+               x = "Celltype", y = "Score", fill = "Risk", xlab = "", color = "black", 
+               palette = "jco") + rotate_x_text(angle = 45) + grids(linetype = "dashed") + 
+  theme(legend.title = element_text(size = 14), legend.text = element_text(size = 12), 
+        axis.title.x = element_text(size = 14), axis.text.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 14), axis.text.y = element_text(size = 12)) + 
+  border("black") + theme(legend.position = "top")
+
+p1 + stat_compare_means(aes(group = Risk),method = "wilcox.test",  label = "p.signif", 
+                       label.y.npc = "top", hide.ns = T)
+
+```
+
+# 4.Correlation between risk score and immune cell ratio
+
+```{r}
+rm(list=ls())
+load("data/riskscore_model.Rdata")
+load("data/Pancreas_expr_ph.Rdata")
+# Lots of packages required for immunedeconv R package
+# devtools::install_github("GfellerLab/EPIC", build_vignettes=TRUE)
+# install.packages("testit")
+# install.packages("data.tree")
+# install.packages("limSolve")
+# install.packages("ComICS")
+# install.packages("pracma")
+# 
+# BiocManager::install("sva")
+# devtools::install_github('dviraran/xCell')
+# devtools::install_github("ebecht/MCPcounter",ref="master", subdir="Source")
+# BiocManager::install("singscore")
+# devtools::install_github("cansysbio/ConsensusTME")
+# devtools::install_github("cit-bioinfo/mMCP-counter")
+# BiocManager::install("quantiseqr")
+#devtools::install_github("Moonerss/CIBERSORT")
+
+library(immunedeconv) # tpm, cpm without log transformation.
+library(edgeR)
+dat <- cpm(exp)+ 1 #cpm
+
+library(stringr)
+dat=dat[,str_sub(colnames(dat,1,15)) %in% rownames(risk_model)]
+dat=dat[,rownames(risk_model)]
+identical(colnames(dat),rownames(risk_model))
+# [1] TRUE
+
+method=c('xcell','timer','quantiseq')
+
+# load coding gene list downloaded from TCGA
+load("data/coding_genes.Rdata") 
+dat=dat[rownames(dat) %in%coding_genes,]
+
+res1=deconvolute(dat,'xcell');res1=res1[-(37:39),]
+indications=c(rep("PAAD",ncol(dat)))
+res2=deconvolute(dat,'timer',indications = indications)  
+res3=deconvolute(dat,'quantiseq')
+
+# CIBERSORT
+library(CIBERSORT)
+write.table (dat, file ="data/paad_cpm.txt", sep ="\t", row.names =TRUE, col.names =TRUE, quote =TRUE)
+
+sig_matrix <- system.file("extdata", "LM22.txt", package = "CIBERSORT")
+
+res4 <- cibersort(sig_matrix, "data/paad_cpm.txt",perm = 0,QN = T)
+res4=res4[,1:22]
+
+res4=as.data.frame(t(res4))%>%
+  tibble::add_column(cell_type = rownames(.),.before="TCGA-HZ-7922-01")%>%
+  tibble::remove_rownames(.)
+
+
+## combine all results
+
+res1$cell_type=paste(res1$cell_type,'XCELL',sep = '_')
+res2$cell_type=paste(res2$cell_type,'TIMER',sep = '_')
+res3$cell_type=paste(res3$cell_type,'QUANTISEQ',sep = '_')
+res4$cell_type=paste(res4$cell_type,'CIBERSORT',sep = '_')
+cell_ratio=dplyr::bind_rows(res1,res2,res3,res4)%>%
+  tibble::column_to_rownames("cell_type")
+
+immune_cell=t(cell_ratio)%>%
+  as.data.frame()
+identical(rownames(immune_cell),rownames(risk_model))
+#[1] TRUE
+
+save(immune_cell,file="data/TME/immune_cell_ratio.Rdata")
+
+# correlation
+library(psych)
+cor <-psych::corr.test(risk_model$riskscore, immune_cell, method = 'spearman',adjust="none")
+
+cmt <-t(as.data.frame(cor$r))%>%
+  as.data.frame()%>%
+  tibble::add_column(rownames(.))%>%
+  tibble::remove_rownames(.)
+
+colnames(cmt)=c("Correlation Coefficient","Immune cell")
+
+
+pmt <-t(as.data.frame(cor$p))%>%
+  as.data.frame()%>%
+  tibble::add_column(rownames(.))%>%
+  tibble::remove_rownames(.)
+
+colnames(pmt)=c("P","Immune cell")
+
+df=dplyr::inner_join(cmt,pmt)
+df=df[,c(2,1,3)]
+
+# p-value 0.05
+df=df[df$P<0.05,] 
+df=na.omit(df)
+df=df[!df$`Immune cell`=="uncharacterized cell_QUANTISEQ",]
+
+df$`Immune cell`=factor(df$`Immune cell`, levels = df$`Immune cell`)
+rev(table(stringr::str_split(df$`Immune cell`,'_',simplify = T)[,2]))
+# XCELL  TIMER  QUANTISEQ  CIBERSORT 
+# 12     3      6          6
+
+df$Software=c(rep('XCELL',12),rep('TIMER',3),rep('QUANTISEQ',6), rep('CIBERSORT',6))
+
+
+#画图
+library(ggplot2)
+y_cols <- c(rep('#f27767',12),rep('#bc9826',3),rep('#53b449',6),rep('#d269a4',6))
+
+ggplot()+
+  geom_point(data=df,aes(`Correlation Coefficient`,`Immune cell`,color=Software),
+             shape=16,size=5.7)+
+  theme_bw()+
+  scale_color_manual(values = c('XCELL' = "#f27767",'TIMER' = "#bc9826",
+                                'QUANTISEQ'="#53b449",'CIBERSORT'="#d269a4"))+
+  theme(axis.text.y=element_text(color=y_cols,size=10),
+        axis.text.x=element_text(size=10,color = 'black'),
+        axis.title.x = element_text(size=12),
+        axis.title.y = element_text(size=12))
+
+
+```
+
+# 5.Immune subtype
+
+```{r}
+rm(list=ls())
+# referenc: https://www.jianshu.com/p/9b52eae8064b
+load("data/TME/immunescore.Rdata")
+devtools::install_github("CRI-iAtlas/ImmuneSubtypeClassifier")
+
+library(ImmuneSubtypeClassifier)
+library(dplyr)
+Isubtype <- callEnsemble(X = paad, geneids = 'symbol')[,1:2]
+Isubtype$BestCall=paste0('C',Isubtype$BestCall)
+identical(Isubtype$SampleIDs,rownames(immu_dat))
+#[1] TRUE
+
+immune_C=cbind(immu_dat[,c(1:9,11)],Isubtype[,2])
+colnames(immune_C)[11]="subtype"
+save(immune_C,file="data/TME/Immune_subtype.Rdata")
+
+
+# plot
+df=immune_C[,10:11]%>%
+  group_by(Risk,subtype)%>%
+  summarise(Ratio=n())
+
+library(ggplot2)
+library(paletteer)
+ggplot()+
+  geom_bar(data =df, aes(x =Risk, y = Ratio, fill = subtype),
+           stat = "identity",
+           position = "fill")+
+  theme_classic()+
+  scale_fill_paletteer_d("RColorBrewer::Set2")+
+  theme(axis.text.x=element_text(size=12,color = 'black'),
+        axis.text.y=element_text(size=12,color = 'black'),
+        axis.title.x = element_text(size=14),
+        axis.title.y = element_text(size=14),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=10))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+

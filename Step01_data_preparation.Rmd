@@ -1,0 +1,120 @@
+---
+title: "Identification and validation of T cell exhaustion signature for predicting
+  prognosis and immune response in Pancreatic cancer by integrated analyses of single-cell
+  and bulk RNA sequencing data"
+author: "Xiong Wang"
+date: "2023-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.Data preparation
+## 1.1 TCGA-GTex data preparation
+The TCGA-GTex data was downloaded from https://xenabrowser.net/datapages/?cohort=TCGA%20TARGET%20GTEx&removeHub=https%3A%2F%2Fxena.treehouse.gi.ucsc.edu%3A443
+</br>
+![Download data from Xena](./1.jpg)
+</br>
+The TCGA-GTex count matrix: https://xenabrowser.net/datapages/?dataset=TcgaTargetGtex_gene_expected_count&host=https%3A%2F%2Ftoil.xenahubs.net&removeHub=https%3A%2F%2Fxena.treehouse.gi.ucsc.edu%3A443
+</br>
+Phenotype data: https://toil-xena-hub.s3.us-east-1.amazonaws.com/download/TcgaTargetGTEX_phenotype.txt.gz
+</br>
+Survival data: https://toil-xena-hub.s3.us-east-1.amazonaws.com/download/TCGA_survival_data
+</br>
+ID/Gene Mapping: https://toil-xena-hub.s3.us-east-1.amazonaws.com/download/probeMap%2Fgencode.v23.annotation.gene.probemap
+</br>
+```{r,eval=FALSE}
+if(F){
+  counts = data.table::fread("data/TcgaTargetGtex_gene_expected_count.gz",data.table = F) # log2(expected_count+1)
+  ph = data.table::fread("data/TcgaTargetGTEX_phenotype.txt.gz",data.table = F)
+  id2gene=data.table::fread("data/probeMap_gencode.v23.annotation.gene.probemap",data.table = F)
+  survival=data.table::fread("data/TCGA_survival_data",data.table = F)
+  
+  # Ensembl id to gene name
+  id2gene=id2gene[,1:2]
+  counts[1:4,1:4]
+  counts=dplyr::inner_join(counts,id2gene,by=c("sample"="id"))
+  counts=counts[!duplicated(counts$gene),]
+  rownames(counts) <- counts$gene
+  counts = counts[,!colnames(counts) %in% c("sample","id","gene")]
+  counts[1:4,1:4]
+  
+  rownames(ph) <- ph$sample
+  ph = ph[,-1]
+  expr = as.matrix(counts)
+  dim(expr)
+  # [1] 58581 19109
+  dim(ph)
+  # [1] 19131     6
+  
+  # match sample id
+  table(rownames(ph)%in%colnames(expr))
+  # FALSE  TRUE 
+  # 22     19109
+  table(colnames(expr)%in%rownames(ph))
+  # TRUE 
+  # 19109
+  ph = ph[match(colnames(expr),rownames(ph)),]
+  identical(colnames(expr),rownames(ph))
+  # [1] TRUE
+  
+  # Select TCGA and GTex samples
+  table(ph$`_study`)
+  # GTEX    TARGET   TCGA 
+  # 7845    734      10530
+  
+  keep = ph$`_study`!="TARGET"
+  ph=ph[keep,]
+  expr = expr[,keep]
+  survival=survival[survival$sample %in% colnames(counts),]
+  save(expr,ph,survival, file = "data/gtex_tcga_expr_ph.Rdata")
+}
+load("data/gtex_tcga_expr_ph.Rdata")
+```
+
+## 1.2 PAAD data preparation
+The PAAD phenotye and survival data were downloaded from https://xenabrowser.net/datapages/?cohort=GDC%20TCGA%20Pancreatic%20Cancer%20(PAAD)&removeHub=https%3A%2F%2Fxena.treehouse.gi.ucsc.edu%3A443
+</br>
+![The PAAD phenotye and survival data](./2.jpg)
+</br>
+PAAD phenotype data: https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-PAAD.GDC_phenotype.tsv.gz
+</br>
+PAAD survival data: https://gdc-hub.s3.us-east-1.amazonaws.com/download/TCGA-PAAD.survival.tsv
+</br>
+```{r,eval=FALSE}
+# PAAD Clinical data
+ph1 = data.table::fread("data/TCGA-PAAD.GDC_phenotype.tsv.gz",data.table = F)
+survival1=data.table::fread("data/TCGA-PAAD.survival.tsv",data.table = F)
+survival1=dplyr::inner_join(survival1,ph1,by=c("sample"="submitter_id.samples"))
+
+# match the sample name of PAAD data with TCGA-GTex data
+survival1$sample=stringr::str_sub(survival1$sample,1,15)
+rownames(survival1)=survival1$sample
+survival1=survival1[,c("OS","OS.time","age_at_initial_pathologic_diagnosis","gender.demographic",
+                       "pathologic_M","pathologic_N","pathologic_T","neoplasm_histologic_grade","tumor_stage.diagnoses")]
+colnames(survival1)=c("event","time","age","gender","M","N","T","grade","stage")
+
+# Remove the normal samples in survival data!!!
+dim(survival1)
+# [1] 222   9
+survival1=survival1[as.numeric(stringr::str_sub(rownames(survival1),14,15))<10,] 
+dim(survival1)
+# [1] 185   9
+
+table(ph$`_primary_site`)
+keep2 = ph$`_primary_site`=="Pancreas" # Select Pancreas data from TCGA-GTex
+
+exp = expr[,keep2] # Select pancreas expression matrix
+
+# Transform the count from Xena (log2(expected_count+1)) to raw count
+exp = 2^exp -1
+
+library(edgeR)
+exp_cpm <- log2(cpm(exp)+ 1) #cpm
+
+Pancreas_ph = ph[keep2,]
+meta = survival1[rownames(survival1) %in% colnames(exp),]
+save(Pancreas_ph,meta,exp,exp_cpm, file = "data/Pancreas_expr_ph.Rdata")
+```

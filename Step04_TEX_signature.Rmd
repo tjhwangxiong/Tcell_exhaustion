@@ -1,0 +1,230 @@
+---
+title: "Identification of TEX-related gene signature in PAAD"
+author: "Xiong Wang"
+date: "2023-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.CD8Tex DEGs with prognostic potential
+CD8Tex genes were downloaded from PAAD_CRA001160 scRNA-seq dataset in TISCH2 database (http://tisch.comp-genomics.org/home/).
+
+```{r,eval=FALSE}
+rm(list=ls())
+library(dplyr)
+
+# import the DEGs with prognostic potential in univariate Cox regression and KM survival analysis
+cox_degs=read.csv("data/deg_unicox.csv",row.names = 1)
+km_degs=read.csv("data/deg_km.csv",row.names = 1)
+
+# CD8Tex genes were downloaded from PAAD_CRA001160 scRNA-seq dataset in TISCH2 database
+tex=data.table::fread("data/PAAD_CRA001160_AllDiffGenes_table.tsv",data.table = F)
+tex=tex[tex$`Celltype (major-lineage)`=="CD8Tex",]
+tex=tex[tex$log2FC>0.3 | tex$log2FC<(-0.3),] # use log2FC=0.3 as a cut-off value
+tex=tex[tex$`Adjusted p-value`<0.05,]
+  
+tex=tex%>%
+  select(Gene)%>%
+  as.vector()%>%
+  unlist()%>%
+  unique()
+
+# intersect these genes
+tex_g <- Reduce(intersect, list(tex,rownames(cox_degs),rownames(km_degs)))
+length(tex_g)
+# [1] 49
+
+load("data/Pancreas_expr_ph.Rdata")
+
+surv_tex_g = cbind(meta,t(exp_cpm[tex_g,rownames(meta)]))
+
+save(surv_tex_g,file="data/survival_expression_data_preLasso.Rdata")
+
+```
+
+# 2.LASSO regression analysis
+
+```{r,eval=FALSE}
+rm(list=ls())
+load("data/survival_expression_data_preLasso.Rdata")
+
+library(survival)
+x = as.matrix(surv_tex_g[,-c(1:9)]) # the 1-9 columns were clinical data
+y = data.matrix(Surv(surv_tex_g$time,surv_tex_g$event)) 
+
+library(glmnet)
+set.seed(102141)
+cvfit = cv.glmnet(x, y, family="cox") 
+fit=glmnet(x, y, family = "cox") 
+
+coef = coef(fit, s = cvfit$lambda.min) 
+index = which(coef != 0) 
+actCoef = coef[index] 
+lassoGene = row.names(coef)[index] 
+lassoGene
+# [1] "SPOCK2"  "MT1X"    "EMP1"    "RARRES3" "RHOF"    "MEG3"    "LIPH"    "PLAU"    "SFTA2"  
+# [10] "S100A14" "AIM2"    "ADAM9"   "PSCA"    "RIC3" 
+
+par(mfrow = c(1,2))
+plot(cvfit) 
+plot(fit,xvar="lambda",label = F)
+
+surv_lasso = cbind(surv_tex_g[,1:9],surv_tex_g[,lassoGene])
+save(lassoGene,surv_lasso,file="data/lasso.Rdata")
+```
+
+# 3.My.stepwise.coxph
+```{r,eval=FALSE}
+rm(list=ls())
+load("data/lasso.Rdata")
+
+### survival (v3.3-1) is required for My.stepwise, and other version of survival R package did not work.
+library(My.stepwise) 
+My.stepwise.coxph(Time = "time",
+                  Status = "event",
+                  variable.list = lassoGene,
+                  data = surv_lasso)
+
+# SPOCK2     MT1X     LIPH  RARRES3     EMP1     MEG3 
+# 1.152596 1.402695 1.413495 1.235721 1.458406 1.191467
+
+stepwise.coxph_gene=c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")
+surv_stepwise.coxph=cbind(surv_lasso[,1:9],surv_lasso[,stepwise.coxph_gene])
+save(stepwise.coxph_gene,surv_stepwise.coxph,file="data/surv_stepwise.coxph.Rdata")
+
+```
+# 4.Univariate Cox regression analysis
+```{r}
+rm(list=ls())
+load("data/surv_stepwise.coxph.Rdata")
+library(survival)
+library(tinyarray)
+
+dat1 = surv_cox(t(surv_stepwise.coxph[,10:15]),surv_stepwise.coxph,
+                continuous = T,pvalue_cutoff = 1)
+dat2 = as.data.frame(dat1[,c("HR","HRCILL","HRCIUL","p")])
+
+datp = format(round(dat2[,1:3],3),nsmall = 3)
+
+dat2$Trait = rownames(dat1)
+dat2$HR2 = paste0(datp[, 1], "(", datp[, 2], "-", datp[, 3], ")")
+dat2$p = ifelse(dat2$p<0.001,"<0.001",format(round(dat2$p,3),nsmall = 3))
+
+# plot
+labeltext=cbind(c("gene",rownames(dat2)),
+                      c("HR (95%CI)",dat2$HR2),
+                      c("P Value",dat2$p))
+library(forestplot)
+forestplot(
+  labeltext,
+  mean = c(NA,dat2[, 1]),
+  lower = c(NA,dat2[, 2]),
+  upper = c(NA,dat2[, 3]),
+  zero = 1,
+  boxsize = 0.2,
+  title="Hazard Ratio Plot (Univariate Cox)",
+  xlab="Odds Ratio",
+  is.summary=c(TRUE,rep(FALSE,6)),
+  col = fpColors(box = '#1075BB', lines = 'black', zero = 'grey'),
+  lty.ci = "solid",
+  graph.pos = 3, # position of box plot
+  txt_gp=fpTxtGp(label = gpar(cex=1.1),
+                 ticks = gpar(cex=1.1),
+                 xlab = gpar(cex=1.1),
+                 title = gpar(cex=1.2))
+)
+```
+# 5.Multivariate Cox regression analysis
+
+```{r}
+rm(list=ls())
+load("data/surv_stepwise.coxph.Rdata")
+library(survival)
+library(tinyarray)
+
+model = coxph(Surv(time,event)~SPOCK2+MT1X+LIPH+RARRES3+EMP1+MEG3,data = surv_stepwise.coxph)
+
+m = summary(model)
+
+# HR and 95%CI
+dat2 = as.data.frame(round(m$conf.int[, c(1, 3, 4)], 2))
+dat2 = tibble::rownames_to_column(dat2, var = "Trait")
+colnames(dat2)[2:4] = c("HR", "lower", "upper")
+
+# HR and p value
+dat2$HR2 = paste0(dat2[, 2], "(", dat2[, 3], "-", dat2[, 4], ")")
+dat2$p = round(m$coefficients[, 5], 3)
+
+# plot
+labeltext=cbind(c("gene",dat2$Trait),
+                c("HR (95%CI)",dat2$HR2),
+                c("P Value",dat2$p))
+library(forestplot)
+forestplot(
+  labeltext,
+  mean = c(NA,dat2[, 2]),
+  lower = c(NA,dat2[, 3]),
+  upper = c(NA,dat2[, 4]),
+  zero = 1,
+  boxsize = 0.2,
+  title="Hazard Ratio Plot (Multivariate Cox)",
+  xlab="Odds Ratio",
+  is.summary=c(TRUE,rep(FALSE,6)),
+  col = fpColors(box = '#1075BB', lines = 'black', zero = 'grey'),
+  lty.ci = "solid",
+  graph.pos = 3, # position of box plot
+  txt_gp=fpTxtGp(label = gpar(cex=1.1),
+                 ticks = gpar(cex=1.1),
+                 xlab = gpar(cex=1.1),
+                 title = gpar(cex=1.2))
+)
+```
+
+# 6. Model construction and riskscore calculation
+```{r}
+rm(list=ls())
+load("data/surv_stepwise.coxph.Rdata")
+
+library(survival)
+
+# CD8TEX Model
+model = coxph(Surv(time,event)~SPOCK2+MT1X+LIPH+RARRES3+EMP1+MEG3,data = surv_stepwise.coxph)
+library(dplyr)
+risk_model=surv_stepwise.coxph
+
+# riskscore calculation
+risk_model$riskscore = apply(risk_model[,stepwise.coxph_gene], 1,function(k)sum(model$coefficients * k)) 
+
+# define high- and low-risk group based on median riskscore value
+risk_model$Risk = ifelse(risk_model$riskscore<median(risk_model$riskscore),"low","high")
+risk_model$Risk = factor(risk_model$Risk,levels = c("low","high"))
+
+### Patient distribution ###
+library(tinyarray)
+risk_plot(t(risk_model[,10:15]),risk_model,risk_model$riskscore)
+
+# remove the expression data of these six genes
+risk_model=risk_model[,-c(10:15)]
+
+# cleaning of clinical information
+risk_model$gender=ifelse(risk_model$gender=="male",0,1)
+
+risk_model$M=as.numeric(ifelse(risk_model$M %in% c("M0","MX"),0,ifelse(risk_model$M=="M1",1,'')))
+
+risk_model$N=as.numeric(ifelse(risk_model$N %in% c("N0","NX"),0,ifelse(risk_model$N %in% c("N1","N1b"),1,'')))
+
+risk_model$T=as.numeric(ifelse(risk_model$T %in% c("T1","TX"),1,ifelse(risk_model$T=="T2",2,
+                                      ifelse(risk_model$T=="T3",3,ifelse(risk_model$T=="T4",4,'')))))
+
+risk_model$grade=as.numeric(ifelse(risk_model$grade %in% c("G1","GX"),1,ifelse(risk_model$grade=="G2",2,
+                                                                   ifelse(risk_model$grade=="G3",3,ifelse(risk_model$grade=="G4",4,'')))))
+risk_model$stage=as.numeric(ifelse(risk_model$stage %in% c("stage i","stage ia","stage ib"),1,
+                             ifelse(risk_model$stage %in% c("stage iia","stage iib"),2,
+                                    ifelse(risk_model$stage=="stage iii",3,ifelse(risk_model$stage=="stage iv",4,'')))))
+
+save(model,risk_model,file="data/riskscore_model.Rdata")
+
+```

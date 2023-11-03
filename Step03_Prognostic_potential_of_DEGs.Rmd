@@ -1,0 +1,52 @@
+---
+title: "Prognostic potential of DEGs"
+author: "Xiong Wang"
+date: "2023-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.Univariate Cox regression
+
+```{r, eval=FALSE}
+rm(list=ls())
+load("data/Pancreas_expr_ph.Rdata")
+load("data/Pancreas_DEG.Rdata")
+
+library(tinyarray)
+library(stringr)
+
+# load the DEGs
+deg1=read.csv("data/up_deg.csv",row.names = 1)
+deg2=read.csv("data/down_deg.csv",row.names = 1)
+deg=c(deg1$x,deg2$x)
+
+
+exp1=exp_cpm
+
+# cpm matrix of DEGs in tumor samples
+exp1 = exp1[rownames(exp1) %in% deg, rownames(meta)]
+
+# check the sample name of cpm matrix and survival data
+identical(rownames(meta),colnames(exp1))
+# [1] TRUE
+
+# perform univariate Cox regression, summarize the cox p value and HR for genes
+Cox_degs = surv_cox(exp1,meta,continuous = T)
+
+write.csv(Cox_degs,file="data/deg_unicox.csv")
+
+```
+
+# 2.Kaplan-Meier survival analysis
+
+```{r, eval=FALSE}
+km_deg = surv_KM(exp1,meta)%>%
+  as.data.frame()
+ 
+write.csv(km_deg,file="data/deg_km.csv")
+
+```

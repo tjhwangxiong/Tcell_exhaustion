@@ -1,0 +1,59 @@
+---
+title: "KM plot and time-ROC curve grouped by risk score"
+author: "Xiong Wang"
+date: "2023-10-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.KM plot grouped by risk score
+
+```{r}
+rm(list=ls())
+load("data/riskscore_model.Rdata")
+library(survival)
+library(survminer)
+
+sfit = survfit(Surv(time, event) ~ Risk, data = risk_model)
+ggsurvplot(sfit, pval = TRUE, palette = "jco", 
+                            data = risk_model, legend = c(0.8, 0.8), risk.table = T)
+```
+
+# 2.time-ROC curve
+
+```{r}
+rm(list=ls())
+load("data/riskscore_model.Rdata")
+library(timeROC)
+result <-with(risk_model, timeROC(T=time,
+                           delta=event,
+                           marker=riskscore,
+                           cause=1,
+                           times=c(365,1095,1825),
+                           iid = TRUE))
+df = data.frame(fpr = as.numeric(result$FP),
+                   tpr = as.numeric(result$TP),
+                   time = rep(as.factor(c(365,1095,1825)),each = nrow(result$TP)))
+  
+library(ggplot2)
+p= ggplot() + 
+    geom_line(data = df,aes(x = fpr, y = tpr,color = time),size = 1) + 
+    scale_color_manual(name = NULL,values = c("#92C5DE", "#F4A582", "#66C2A5"),
+                       labels = paste0("AUC of ",c(1,3,5),"-y survival: ",
+                                       format(round(result$AUC,2),nsmall = 2)))+
+    geom_line(aes(x=c(0,1),y=c(0,1)),color = "grey")+
+    theme_bw()+
+    theme(panel.grid = element_blank(),
+          legend.background = element_rect(linetype = 1, size = 0.2, colour = "black"),
+          legend.position = c(0.765,0.125))+
+    scale_x_continuous(expand = c(0.005,0.005))+
+    scale_y_continuous(expand = c(0.005,0.005))+
+    labs(x = "1 - Specificity",
+         y = "Sensitivity")+
+    coord_fixed()
+
+p
+```

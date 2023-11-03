@@ -1,0 +1,188 @@
+---
+title: "Mutation landscape"
+author: "Xiong Wang"
+date: "2023-11-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.Mutations and CDR download
+Both Mutations and TCGA-Clinical Data Resource (CDR) Outcome were downloaded from https://gdc.cancer.gov/about-data/publications/pancanatlas
+![Mutations and CDR outcome](./3.jpg)
+
+mc3.v0.2.8.PUBLIC.maf.gz: http://api.gdc.cancer.gov/data/1c8cfe5f-e52d-41ba-94da-f15ea1337efc
+TCGA-CDR-SupplementalTableS1.xlsx: https://api.gdc.cancer.gov/data/1b5f413e-a8d1-4d10-92eb-7c4ae739ed81
+
+```{r}
+rm(list = ls())
+library(maftools) 
+
+# reference: http://www.bio-info-trainee.com/8569.html
+# reference: https://zhuanlan.zhihu.com/p/419960451
+
+laml=read.maf('data/mutation/mc3.v0.2.8.PUBLIC.maf.gz')
+laml
+save(laml,file = 'data/mutation/mc3.Rdata')
+
+```
+
+# 2. PAAD mutation data
+
+```{r}
+rm(list = ls())
+library(maftools)
+library(readxl)
+
+load(file = 'mc3.Rdata')
+
+### split mc3 based on tumor type
+phe=read_excel('data/mutation/TCGA-CDR-SupplementalTableS1.xlsx',sheet = 1)
+phe=as.data.frame(phe) 
+table(phe$type)
+cp_list=split(phe$bcr_patient_barcode,phe$type)
+cg_tmp=laml@data
+lapply(1:length(cp_list), function(i){
+  cp=cp_list[[i]]
+  pro=names(cp_list)[i]
+  cg_cp_tmp=cg_tmp[substring(cg_tmp$Tumor_Sample_Barcode,1,12) %in% cp,]
+  laml = read.maf(maf = cg_cp_tmp)
+  save(laml,file= paste0('data/mutation/','maftools-',pro,'.Rdata') ) 
+})
+
+```
+
+# 3.Waterfall plots
+
+```{r}
+rm(list = ls())
+library(maftools) 
+library(stringr)
+load(file = 'data/mutation/maftools-PAAD.Rdata') 
+load("data/riskscore_model.Rdata")
+
+# prepare data
+ph1=rownames(risk_model)[risk_model$Risk=="low"]
+ph2=rownames(risk_model)[risk_model$Risk=="high"]
+cg_tmp=laml@data
+
+cg_tmp_low=cg_tmp[str_sub(cg_tmp$Tumor_Sample_Barcode,1,15) %in% ph1,]
+cg_tmp_high=cg_tmp[str_sub(cg_tmp$Tumor_Sample_Barcode,1,15) %in% ph2,]
+
+paad_low = read.maf(maf = cg_tmp_low)
+
+# add risk information
+paad_low@clinical.data$risk='low'
+
+paad_high = read.maf(maf = cg_tmp_high)
+
+# add risk information
+paad_high@clinical.data$risk='high'
+
+
+# Waterfall plots
+# define color
+lowcolor='#0073c2'
+names(lowcolor)="low"
+phecolor1 = list(risk = lowcolor)
+
+highcolor='#efc000'
+names(highcolor)="high"
+phecolor2 = list(risk = highcolor)
+
+# waterfall plot of low risk group
+oncoplot(maf = paad_low,top = 5,clinicalFeatures=c('risk'),
+            sortByAnnotation=T,annotationColor = phecolor1,
+         draw_titv = T)  
+
+# waterfall plot of low risk group
+oncoplot(maf = paad_high,top = 5,clinicalFeatures=c('risk'),
+            sortByAnnotation=T,annotationColor = phecolor2,
+         draw_titv = T)  
+
+```
+
+# 4.Differentially mutated genes
+
+```{r}
+rm(list = ls())
+library(maftools) 
+library(stringr)
+# referenc: http://www.bio-info-trainee.com/8569.html
+
+load(file = 'data/mutation/maftools-PAAD.Rdata') 
+load("data/riskscore_model.Rdata")
+phe=risk_model[order(risk_model$Risk),]
+cg_tmp=laml@data
+cg_tmp=cg_tmp[str_sub(cg_tmp$Tumor_Sample_Barcode,1,15) %in% rownames(phe),]
+paad=read.maf(cg_tmp)
+
+
+# add risk information
+paad@clinical.data
+pos=match(substring(as.character(paad@clinical.data$Tumor_Sample_Barcode),1,15),rownames(phe))
+paad@clinical.data$risk=phe$Risk[pos]
+table(paad@clinical.data$risk)
+#low high 
+#84   84
+oncoplot(maf = paad,clinicalFeatures=c('risk'),sortByAnnotation=T,draw_titv = T,top = 5)
+
+# Differentially mutated genes analysis
+df=as.data.frame(paad@data)
+cg=as.character(paad@clinical.data$Tumor_Sample_Barcode)[paad@clinical.data$risk=='low']
+cg
+low.maf <- read.maf(df[df$Tumor_Sample_Barcode %in% cg, ])
+
+cg=as.character(paad@clinical.data$Tumor_Sample_Barcode)[paad@clinical.data$risk=='high']
+cg
+high.maf <- read.maf(df[df$Tumor_Sample_Barcode %in% cg, ])
+
+pt.vs.rt <- mafCompare(m1 = low.maf, m2 = high.maf, m1Name = 'low',
+                       m2Name = 'high', minMut = 5)
+# forest plot
+forestPlot(mafCompareRes = pt.vs.rt, pVal = 0.05,
+           geneFontSize = 1, titleSize = 1.4)
+
+```
+
+# 5.Enrichr plot
+
+GO enrichment was performed at: https://maayanlab.cloud/Enrichr/enrich
+
+```{r}
+go_bp=data.table::fread("data/mutation/GO_Biological_Process_2023_table.txt",data.table = F)
+go_bp$logp=-log10(go_bp$`P-value`)
+go_bp=go_bp[,c(1,10)]
+
+library(tidyverse) 
+library(ggthemes)
+library(ggprism)
+df=go_bp[1:10,]
+df=df[order(df$logp,decreasing = T),]
+df$Term=factor(df$Term,levels = rev(unique(df$Term)))
+
+p <- ggplot(df,aes(x = Term, y = logp)) +
+  geom_col(width = 0.8,fill='#FFC0CB')+
+  coord_flip() + 
+  xlab('Biological Process') + 
+  ylab('-log10(P value)') + 
+  theme_bw()+
+  guides(fill="none")+
+  theme(axis.text.x = element_text(size = 10,color = "black"),
+        axis.title.x = element_text(size = 12,color = "black"),
+        axis.title.y = element_text(size = 12,color = "black"),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid = element_blank()
+        ) +
+  geom_text(aes(x = Term,y = 0,label = Term),size=3.5,
+            df,hjust = 0,color = 'black')
+
+p
+
+```
+
+
+

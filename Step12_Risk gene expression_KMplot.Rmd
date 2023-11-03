@@ -1,0 +1,72 @@
+---
+title: "Risk gene expression and KM plot"
+author: "Xiong Wang"
+date: "2023-11-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1.Expression of risk genes
+
+```{r}
+rm(list=ls())
+load("data/Pancreas_expr_ph.Rdata")
+
+riskgenes=c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")
+
+# group information
+library(stringr)
+library(reshape2)
+k1 = str_starts(rownames(Pancreas_ph),"TCGA")
+k2 = as.numeric(str_sub(rownames(Pancreas_ph),14,15))<10
+table(k1&k2)
+group_list = ifelse(k1&k2,"tumor","normal")
+group_list = factor(group_list,levels = c("normal","tumor"))
+dat=exp_cpm[riskgenes,]
+dat=as.data.frame(t(dat))
+identical(rownames(dat),rownames(Pancreas_ph))
+#[1] TRUE
+
+dat$group=group_list
+dat=melt(dat,id.vars = "group")
+
+
+library(ggpubr)
+p1 <- ggviolin(dat, 
+                x = "variable", y = "value", fill = "group", xlab = "", color = "black", 
+                palette = "jco",add = "boxplot") + rotate_x_text(angle = 0) + grids(linetype = "dashed") +   ylab("Expression")+
+  theme(legend.title = element_text(size = 10), legend.text = element_text(size = 9), 
+        axis.title.x = element_text(size = 10), axis.text.x = element_text(size = 9), 
+        axis.title.y = element_text(size = 10), axis.text.y = element_text(size = 9)) + 
+  border("black") + theme(legend.position = "right")
+
+p1 + stat_compare_means(aes(group = group), label = "p.signif",method = "wilcox.test", 
+                        label.y = 14, hide.ns = T)
+
+
+
+
+```
+
+# 2.KM plot
+
+```{r}
+rm(list=ls())
+load("data/TME/immunescore.Rdata")
+
+riskgenes=c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")
+df=paad[riskgenes,]
+identical(colnames(df),rownames(immu_dat))
+#[1] TRUE
+
+dat1=immu_dat[,1:2]
+
+library(survival)
+library(survminer)
+library(tinyarray)
+tmp = exp_surv(df,dat1,color = c("#2874C5", "#f87669"))
+patchwork::wrap_plots(tmp)
+```

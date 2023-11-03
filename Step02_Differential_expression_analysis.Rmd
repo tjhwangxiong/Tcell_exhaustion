@@ -1,0 +1,159 @@
+---
+title: "Differential expression analysis"
+author: "Xiong Wang"
+date: "2023-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# 1.Group definication
+
+```{r,eval=FALSE}
+rm(list = ls())
+load("data/Pancreas_expr_ph.Rdata")
+
+# Summary of tumor and normal samples
+library(stringr)
+k1 = str_starts(rownames(Pancreas_ph),"TCGA")
+k2 = as.numeric(str_sub(rownames(Pancreas_ph),14,15))<10
+table(k1&k2)
+# FALSE  TRUE 
+# 171    179
+group_list = ifelse(k1&k2,"tumor","normal")
+group_list = factor(group_list,levels = c("normal","tumor"))
+exp[1:4,1:4]
+
+# Keep genes expressed in more than 150 samples
+k3 = apply(exp,1,function(x){sum(x>1)})>150
+table(k3)
+# FALSE  TRUE 
+# 33750 24831
+exp = exp[k3,]
+
+```
+
+# 2.Differential expression analysis
+DESeq2, edgeR, and limma were used for DEG analysis
+```{r,eval=FALSE}
+### DESeq2
+expr = floor(exp)
+expr[1:4,1:4]
+library(DESeq2)
+colData <- data.frame(row.names =colnames(expr), 
+                      condition=group_list)
+dds <- DESeqDataSetFromMatrix(
+  countData = expr,
+  colData = colData,
+  design = ~ condition)
+
+dds <- DESeq(dds)
+
+res <- results(dds, contrast = c("condition",rev(levels(group_list))))
+resOrdered <- res[order(res$pvalue),] 
+DEG <- as.data.frame(resOrdered)
+
+# remove NA
+DEG <- na.omit(DEG)
+
+# label change
+
+logFC_cutoff <- 2
+DEG$change = as.factor(
+  ifelse(DEG$padj < 0.05 & abs(DEG$log2FoldChange) > logFC_cutoff,
+         ifelse(DEG$log2FoldChange > logFC_cutoff ,'UP','DOWN'),'NOT')
+)
+head(DEG)
+table(DEG$change)
+DESeq2_DEG <- DEG
+
+### edgeR
+expr = exp
+library(edgeR)
+
+dge <- DGEList(counts=expr,group=group_list)
+dge$samples$lib.size <- colSums(dge$counts)
+dge <- calcNormFactors(dge) 
+
+design <- model.matrix(~0+group_list)
+rownames(design)<-colnames(dge)
+colnames(design)<-levels(group_list)
+
+dge <- estimateGLMCommonDisp(dge,design)
+dge <- estimateGLMTrendedDisp(dge, design)
+dge <- estimateGLMTagwiseDisp(dge, design)
+
+fit <- glmFit(dge, design)
+fit2 <- glmLRT(fit, contrast=c(-1,1)) 
+
+DEG=topTags(fit2, n=nrow(exp))
+DEG=as.data.frame(DEG)
+
+logFC_cutoff <- 2
+DEG$change = as.factor(
+  ifelse(DEG$FDR < 0.05 & abs(DEG$logFC) > logFC_cutoff,
+         ifelse(DEG$logFC > logFC_cutoff ,'UP','DOWN'),'NOT')
+)
+head(DEG)
+table(DEG$change)
+edgeR_DEG <- DEG
+
+### limma
+library(limma)
+
+design <- model.matrix(~0+group_list)
+colnames(design)=levels(group_list)
+rownames(design)=colnames(exp)
+
+dge <- DGEList(counts=expr)
+dge <- calcNormFactors(dge)
+
+v <- voom(dge,design, normalize="quantile")
+fit <- lmFit(v, design)
+
+constrasts = paste(rev(levels(group_list)),collapse = "-")
+cont.matrix <- makeContrasts(contrasts=constrasts,levels = design) 
+fit2=contrasts.fit(fit,cont.matrix)
+fit2=eBayes(fit2)
+
+DEG = topTable(fit2, coef=constrasts, n=Inf)
+DEG = na.omit(DEG)
+
+logFC_cutoff <- 2
+DEG$change = as.factor(
+  ifelse(DEG$adj.P.Val < 0.05 & abs(DEG$logFC) > logFC_cutoff,
+         ifelse(DEG$logFC > logFC_cutoff ,'UP','DOWN'),'NOT')
+)
+head(DEG)
+limma_voom_DEG <- DEG
+tj = data.frame(deseq2 = as.integer(table(DESeq2_DEG$change)),
+                edgeR = as.integer(table(edgeR_DEG$change)),
+                limma_voom = as.integer(table(limma_voom_DEG$change)),
+                row.names = c("down","not","up")
+);tj
+
+UP=function(df){
+  rownames(df)[df$change=="UP"]
+}
+
+DOWN=function(df){
+  rownames(df)[df$change=="DOWN"]
+}
+
+up = intersect(intersect(UP(DESeq2_DEG),UP(edgeR_DEG)),UP(limma_voom_DEG))
+down = intersect(intersect(DOWN(DESeq2_DEG),DOWN(edgeR_DEG)),DOWN(limma_voom_DEG))
+
+write.csv(up,file="data/up_deg.csv")
+write.csv(down,file="data/down_deg.csv")
+
+up_deg=cbind(DESeq2_DEG[up,],edgeR_DEG[up,],limma_voom_DEG[up,])
+up_deg=up_deg[,-c(7,13,20)]
+write.csv(up_deg,file="data/up_deg_change.csv")
+
+down_deg=cbind(DESeq2_DEG[down,],edgeR_DEG[down,],limma_voom_DEG[down,])
+down_deg=down_deg[,-c(7,13,20)]
+write.csv(down_deg,file="data/down_deg_change.csv")
+
+save(DESeq2_DEG,edgeR_DEG,limma_voom_DEG,group_list,tj,file = "data/Pancreas_DEG.Rdata")
+```

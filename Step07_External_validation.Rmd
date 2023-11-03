@@ -1,0 +1,309 @@
+---
+title: "External validation"
+author: "Xiong Wang"
+date: "2023-10-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#1. ICGA-PACA-CA
+
+```{r}
+rm(list = ls())
+library(data.table)
+icgc=fread("data/validation/ICGC_PACA_CA/exp_seq.tsv.gz",data.table = F)
+
+exp <- unique(icgc[,c("icgc_donor_id","gene_id","raw_read_count")])
+dat <- dcast(data.table(exp),gene_id~icgc_donor_id,
+             value.var="raw_read_count",fun.aggregate = max)
+# remove NA
+dat=na.omit(dat)
+
+#raw count to cpm
+library(edgeR)
+exp_cpm <- as.data.frame(log2(cpm(dat[,-1])+ 1)) #cpm
+rownames(exp_cpm)=dat$gene_id
+
+# ensembl id to gene name
+library(biomaRt)
+library(dplyr)
+
+riskgenes=c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")
+mart=useMart("ensembl","hsapiens_gene_ensembl")
+
+attr1<- c("ensembl_gene_id","hgnc_symbol") 
+count_ID<- getBM(attributes = attr1,
+                 filters = "hgnc_symbol",
+                 values = riskgenes, 
+                 mart = mart)
+count_ID = rbind(count_ID,c("ENSG00000133321","RARRES3"))
+save(count_ID,file="data/validation/ICGC_PACA_CA/ensembl2id.Rdata")
+
+df=exp_cpm[count_ID$ensembl_gene_id,]
+rownames(df)=count_ID$hgnc_symbol
+df=as.data.frame(t(df))
+df=df[,c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")]
+save(dat,exp_cpm,df,file="data/validation/ICGC_PACA_CA/expression.Rdata")
+
+
+###Risk score###
+load("data/riskscore_model.Rdata")
+library(survival)
+library(survminer)
+
+cl=data.table::fread("data/validation/ICGC_PACA_CA/donor.tsv.gz",data.table = F)
+cl=cl[,c("icgc_donor_id","donor_vital_status","donor_survival_time")]
+cl=na.omit(cl)
+cl=cl[cl$donor_vital_status %in% c("alive","deceased"),]
+cl=cl[cl$donor_survival_time>30,]
+
+table(rownames(df) %in% cl$icgc_donor_id)
+# FALSE  TRUE 
+# 48   186
+
+df=df[rownames(df) %in% cl$icgc_donor_id,]
+cl=cl[match(rownames(df),cl$icgc_donor_id),]
+identical(rownames(df),cl$icgc_donor_id)
+# [1] TRUE
+
+df$riskscore = apply(df[,], 1,function(k)sum(model$coefficients * k)) 
+df$Risk = ifelse(df$riskscore<median(df$riskscore),"low","high")
+df$Risk = factor(df$Risk,levels = c("low","high"))
+
+meta=cbind(cl,df)
+rownames(meta)=meta$icgc_donor_id
+meta=meta[,-1]
+colnames(meta)[1:2]=c("event","time")
+
+meta$event=ifelse(meta$event=="deceased",1,0)
+
+save(meta,file="data/validation/ICGC_PACA_CA/ICGC_risk_model.Rdata")
+
+sfit = survfit(Surv(time, event) ~ Risk, data = meta)
+ggsurvplot(sfit, pval = TRUE, palette = "jco", title="ICGA-PACA-CA",
+           data = meta, legend = c(0.8, 0.8), risk.table = T)
+
+# Patient distribution
+library(tinyarray)
+risk_plot(t(meta[,3:8]),meta,meta$riskscore)
+
+```
+
+#2. ICGA-PAAD-US
+
+```{r}
+rm(list = ls())
+library(data.table)
+icgc=fread("data/validation/ICGC_PAAD_US/exp_seq.tsv.gz",data.table = F)
+
+exp <- unique(icgc[,c("icgc_donor_id","gene_id","raw_read_count")])
+dat <- dcast(data.table(exp),gene_id~icgc_donor_id,
+             value.var="raw_read_count",fun.aggregate = max)
+# remove NA
+dat=na.omit(dat)
+
+#raw count to cpm
+library(edgeR)
+exp_cpm <- as.data.frame(log2(cpm(dat[,-1])+ 1)) #cpm
+rownames(exp_cpm)=dat$gene_id
+
+df=as.data.frame(t(exp_cpm[c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3"),]))
+
+save(dat,exp_cpm,df,file="data/validation/ICGC_PAAD_US/expression.Rdata")
+
+
+###Risk score###
+load("data/riskscore_model.Rdata")
+library(survival)
+library(survminer)
+
+cl=data.table::fread("data/validation/ICGC_PAAD_US/donor.tsv.gz",data.table = F)
+cl=cl[,c("icgc_donor_id","donor_vital_status","donor_survival_time","donor_interval_of_last_followup")]
+cl$time=ifelse(cl$donor_vital_status=="alive",cl$donor_interval_of_last_followup,cl$donor_survival_time)
+cl=cl[,c("icgc_donor_id","donor_vital_status","time")]
+
+cl=na.omit(cl)
+cl=cl[cl$time>30,]
+
+table(rownames(df) %in% cl$icgc_donor_id)
+# FALSE  TRUE 
+# 30     112
+
+df=df[rownames(df) %in% cl$icgc_donor_id,]
+cl=cl[match(rownames(df),cl$icgc_donor_id),]
+identical(rownames(df),cl$icgc_donor_id)
+# [1] TRUE
+
+df$riskscore = apply(df[,], 1,function(k)sum(model$coefficients * k)) 
+df$Risk = ifelse(df$riskscore<median(df$riskscore),"low","high")
+df$Risk = factor(df$Risk,levels = c("low","high"))
+
+meta=cbind(cl,df)
+rownames(meta)=meta$icgc_donor_id
+meta=meta[,-1]
+colnames(meta)[1:2]=c("event","time")
+
+meta$event=ifelse(meta$event=="deceased",1,0)
+
+save(meta,file="data/validation/ICGC_PAAD_US/ICGC_risk_model.Rdata")
+
+sfit = survfit(Surv(time, event) ~ Risk, data = meta)
+ggsurvplot(sfit, pval = TRUE, palette = "jco", title="ICGA-PAAD-US",
+           data = meta, legend = c(0.8, 0.8), risk.table = T)
+
+# Patient distribution
+library(tinyarray)
+risk_plot(t(meta[,3:8]),meta,meta$riskscore)
+```
+
+# 3.GSE71729
+```{r}
+library(GEOquery)
+library(dplyr)
+gse_number = "GSE71729"
+eSet <- getGEO(filename="data/validation/GSE71729/GSE71729_series_matrix.txt.gz",getGPL=F)
+
+# Microarray expression matrix (log2 transformed)
+exp <- exprs(eSet)
+dim(exp)
+# [1] 19749   357
+
+
+# clinical information
+pd <- pData(eSet)
+
+# match sample name
+p = identical(rownames(pd),colnames(exp));p
+if(!p) exp = exp[,match(rownames(pd),colnames(exp))]
+
+# annotation
+gpl_number <- eSet@annotation;gpl_number
+
+pd=pd[pd$source_name_ch2=="Pancreas_Primary",]
+meta=pd[,c("death_event_1death_0censor:ch2","survival_months:ch2")]
+meta=na.omit(meta)
+colnames(meta)=c("event","time")
+meta$time=as.numeric(meta$time)*30
+meta=meta[meta$time>30,]
+meta$event=as.numeric(meta$event)
+
+
+riskgenes=c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")
+
+exp=exp[riskgenes,rownames(meta)]
+
+exp=t(exp)
+exp=as.data.frame(exp)
+identical(rownames(exp),rownames(meta))
+#[1] TRUE
+
+meta=cbind(meta,exp)
+colnames(meta)
+#meta=meta[,c("event","time","SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")]
+
+load("data/riskscore_model.Rdata")
+
+meta$riskscore = apply(meta[,3:8], 1,function(k)sum(model$coefficients * k)) 
+meta$Risk = ifelse(meta$riskscore<median(meta$riskscore),"low","high")
+meta$Risk = factor(meta$Risk,levels = c("low","high"))
+save(meta,file="data/validation/GSE71729/GSE71729_risk_model.Rdata")
+
+library(survival)
+library(survminer)
+
+sfit = survfit(Surv(time, event) ~ Risk, data = meta)
+ggsurvplot(sfit, pval = TRUE, palette = "jco", title="GSE71729",
+           data = meta, legend = c(0.8, 0.8), risk.table = T)
+
+
+# patient distribution
+library(tinyarray)
+risk_plot(t(meta[,3:8]),meta,meta$riskscore)
+
+```
+
+# 4.GSE57495
+```{r}
+library(GEOquery)
+library(dplyr)
+gse_number = "GSE57495"
+eSet <- getGEO(filename="data/validation/GSE57495/GSE57495_series_matrix.txt.gz",getGPL=F)
+
+# Microarray expression matrix (log2 transformed)
+exp <- exprs(eSet)
+dim(exp)
+# [1] 33297   130
+
+
+# clinical information
+pd <- pData(eSet)
+pd=pd[,c("survival status:ch1","survival months:ch1")]
+pd=na.omit(pd)
+pd=pd[!pd$`survival status:ch1`=="?",]
+pd$`survival status:ch1`=as.numeric(pd$`survival status:ch1`)
+pd$`survival months:ch1`=as.numeric(pd$`survival months:ch1`)
+
+# match sample name
+p = identical(rownames(pd),colnames(exp));p
+if(!p) exp = exp[,match(rownames(pd),colnames(exp))]
+
+# annotation
+gpl_number <- eSet@annotation;gpl_number
+
+probe=read.table("data/validation/GSE57495/GPL6244-17930.txt",header = T,
+                 comment.char = "#", sep="\t",fill = T)
+library(stringr)
+probe=probe[,c("ID","gene_assignment")]
+probe=probe[!probe$gene_assignment=="---",]
+probe$gene_assignment=str_split(probe$gene_assignment,' // ',simplify = T)[,2]
+
+table(probe$ID %in% rownames(exp))
+# TRUE 
+# 25293
+
+exp=exp[as.character(probe$ID),]
+rownames(exp)=probe$gene_assignment
+
+
+meta=pd
+meta=na.omit(meta)
+colnames(meta)=c("event","time")
+meta$time=as.numeric(meta$time)*30
+meta=meta[meta$time>30,]
+meta$event=as.numeric(meta$event)
+
+
+riskgenes=c("SPOCK2","MT1X","LIPH","RARRES3","EMP1","MEG3")
+
+exp=exp[riskgenes,rownames(meta)]
+
+exp=t(exp)
+exp=as.data.frame(exp)
+identical(rownames(exp),rownames(meta))
+#[1] TRUE
+
+meta=cbind(meta,exp)
+
+load("data/riskscore_model.Rdata")
+
+meta$riskscore = apply(meta[,3:8], 1,function(k)sum(model$coefficients * k)) 
+meta$Risk = ifelse(meta$riskscore<median(meta$riskscore),"low","high")
+meta$Risk = factor(meta$Risk,levels = c("low","high"))
+save(meta,file="data/validation/GSE57495/GSE57495_risk_model.Rdata")
+
+library(survival)
+library(survminer)
+
+sfit = survfit(Surv(time, event) ~ Risk, data = meta)
+ggsurvplot(sfit, pval = TRUE, palette = "jco", title="GSE57495",
+           data = meta, legend = c(0.8, 0.8), risk.table = T)
+
+
+# patient distribution
+library(tinyarray)
+risk_plot(t(meta[,3:8]),meta,meta$riskscore)
+
+```

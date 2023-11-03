@@ -1,0 +1,152 @@
+---
+title: "Drug sensitivity"
+author: "Xiong Wang"
+date: "2023-11-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Data preparation
+
+The expression matrix and IC50 matrix were downloaded at:https://osf.io/temyk
+
+Data from GDSC2 was used here by using oncoPredict R package.
+
+```{r cars}
+rm(list=ls())
+# reference: https://cloud.tencent.com/developer/article/1887705
+
+library(oncoPredict)
+dir='data/DataFiles/Training Data/'
+GDSC2_Expr = readRDS(file=file.path(dir,'GDSC2_Expr (RMA Normalized and Log Transformed).rds'))
+GDSC2_Res = readRDS(file = file.path(dir,"GDSC2_Res.rds"))
+GDSC2_Res <- exp(GDSC2_Res) 
+load("data/TME/immunescore.Rdata")
+
+calcPhenotype(trainingExprData = GDSC2_Expr,
+              trainingPtype = GDSC2_Res,
+              testExprData = paad,
+              batchCorrect = 'eb',    
+              powerTransformPhenotype = TRUE,
+              removeLowVaryingGenes = 0.2,
+              minNumSamples = 10, 
+              printOutput = TRUE, 
+              removeLowVaringGenesFrom = 'rawData' )
+
+ic50=read.csv("calcPhenotype_Output/DrugPredictions.csv",header = T,row.names = 1)
+identical(rownames(ic50),rownames(immu_dat))
+#[1] TRUE
+
+
+```
+
+# 2.Correlation
+
+```{r}
+library(psych)
+cor <-corr.test(immu_dat$riskscore, ic50, method = 'spearman',adjust="none")
+
+library(dplyr)
+library(tibble)
+cmt <-t(as.data.frame(cor$r))%>%
+  as.data.frame()%>%
+  tibble::add_column(rownames(.))%>%
+  tibble::remove_rownames(.)
+
+colnames(cmt)=c("Correlation Coefficient","Drug")
+
+
+pmt <-t(as.data.frame(cor$p))%>%
+  as.data.frame()%>%
+  tibble::add_column(rownames(.))%>%
+  tibble::remove_rownames(.)
+
+colnames(pmt)=c("P","Drug")
+
+df=inner_join(cmt,pmt)
+df=df[,c(2,1,3)]
+
+# p-value: 0.05
+df=df[df$P<0.05,] 
+df=na.omit(df)
+write.csv(df,file="data/GDSC_Drug_Cor.csv")
+```
+
+# 3.Scatter plot
+
+```{r}
+# reference: https://www.jianshu.com/p/73f67ba228c0
+
+p_cutoff=0.05
+
+pos=subset(df,`Correlation Coefficient`>0)
+neg=subset(df,`Correlation Coefficient`<0)
+
+Diff <- rbind(pos[order(pos$P),][1:5,], neg[order(neg$P),][1:5,]) 
+  
+dat_plot <- data.frame(id  = Diff$Drug,
+                       p   = Diff$P,
+                       lgfc= Diff$`Correlation Coefficient`)
+
+# ggstatsplot 0.0.6 is required
+library(ggstatsplot)
+packageVersion("ggstatsplot")
+
+dat=cbind(ic50[,dat_plot$id],immu_dat$riskscore)
+colnames(dat)[11]="Riskscore"
+
+plot_wx=function(drug){ggstatsplot::ggscatterstats(
+  data = dat, 
+  x = drug,
+  y = "Riskscore",
+  type = "np",
+  xlab = drug,
+  ylab = "Riskscore",
+  k = 2L,
+  title = '',
+  messages = FALSE,
+  marginal.type = "density"
+)
+}
+
+splots=lapply(colnames(dat)[1:10],plot_wx)
+names(splots)=colnames(dat)[1:10]
+patchwork::wrap_plots(splots,ncol=4)
+
+```
+
+# 4.Box plot
+
+```{r}
+identical(rownames(ic50),rownames(immu_dat))
+# [1] TRUE
+
+ic50_drug=cbind(immu_dat,ic50[,dat_plot$id])
+ic50_drug=ic50_drug[,c(11,15:24)]
+
+library(reshape2)
+ic50_drug=melt(ic50_drug,id.vars = "Risk")
+colnames(ic50_drug)=c("Risk","Drug","IC50")
+ic50_drug$IC50=log10(ic50_drug$IC50+1)
+#ic50_drug=ic50_drug[!ic50_drug$Drug %in% c("Selumetinib_1736","ERK_6604_1714"),]
+
+library(ggpubr)
+p1 <- ggboxplot(ic50_drug, 
+               x = "Drug", y = "IC50", fill = "Risk", xlab = "", color = "black", 
+               palette = "jco") + rotate_x_text(angle = 10) + grids(linetype = "dashed") + 
+  ylab("log10(IC50+1)")+
+  theme(legend.title = element_text(size = 10), legend.text = element_text(size = 9), 
+        axis.title.x = element_text(size = 10), axis.text.x = element_text(size = 9), 
+        axis.title.y = element_text(size = 10), axis.text.y = element_text(size = 9)) + 
+  border("black") + theme(legend.position = "right")
+
+p1 + stat_compare_means(aes(group = Risk), label = "p.signif",method = "wilcox.test",
+                       label.y.npc = "top", hide.ns = T)
+
+```
+
+
+
